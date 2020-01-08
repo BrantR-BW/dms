@@ -1,5 +1,7 @@
 package dms
 
+// Add lots of debug to see what SOAP stuff is going on...
+
 import (
 	"bytes"
 	"crypto/md5"
@@ -32,8 +34,8 @@ import (
 
 const (
 	serverField                 = "Linux/3.4 DLNADOC/1.50 UPnP/1.0 DMS/1.0"
-	rootDeviceType              = "urn:schemas-upnp-org:device:MediaServer:1"
-	rootDeviceModelName         = "dms 1.0"
+    rootDeviceType              = "urn:schemas-upnp-org:device:MediaRenderer:1" // Originally this was "MediaServer:1" in DMS
+	rootDeviceModelName         = "Tx Media Renderer"
 	resPath                     = "/res"
 	iconPath                    = "/icon"
 	rootDescPath                = "/rootDesc.xml"
@@ -74,35 +76,55 @@ type service struct {
 	SCPD string
 }
 
-// Exposed UPnP AV services.
 var services = []*service{
+    //TODO: Eventually the content directory should go away, but its nice for testing.
+    {
+        Service: upnp.Service{
+            ServiceType: "urn:schemas-upnp-org:service:ContentDirectory:1",
+            ServiceId:   "urn:upnp-org:serviceId:ContentDirectory",
+            EventSubURL: contentDirectoryEventSubURL,
+            ControlURL: serviceControlURL,
+        },
+        SCPD: contentDirectoryServiceDescription,
+    },
+    // NOTE: These are all QPlay service descriptions
 	{
 		Service: upnp.Service{
-			ServiceType: "urn:schemas-upnp-org:service:ContentDirectory:1",
-			ServiceId:   "urn:upnp-org:serviceId:ContentDirectory",
-			EventSubURL: contentDirectoryEventSubURL,
+			ServiceType: "urn:schemas-upnp-org:service:AVTransport:1",
+			ServiceId:   "urn:upnp-org:serviceId:AVTransport",
+			EventSubURL: "_urn-schemas-upnp-org-service-QPlay_scpd.xml",
+            ControlURL: "_urn-schemas-upnp-org-service-QPlay_control",
 		},
-		SCPD: contentDirectoryServiceDescription,
+        SCPD: QPlayAVTransportDesc,
 	},
-	// {
-	// 	Service: upnp.Service{
-	// 		ServiceType: "urn:schemas-upnp-org:service:ConnectionManager:3",
-	// 		ServiceId:   "urn:upnp-org:serviceId:ConnectionManager",
-	// 	},
-	// 	SCPD: connectionManagerServiceDesc,
-	// },
+	{
+		Service: upnp.Service{
+			ServiceType: "urn:schemas-upnp-org:service:ConnectionManager:1",
+			ServiceId:   "urn:upnp-org:serviceId:ConnectionManager",
+			EventSubURL: "_urn-schemas-upnp-org-service-ConnectionManager_event",
+            ControlURL: "_urn-schemas-upnp-org-service-ConnectionManager_control",
+		},
+        SCPD: QPlayConnectionManagerDesc,
+	},
+	{
+		Service: upnp.Service{
+			ServiceType: "urn:schemas-upnp-org:service:RenderingControl:1",
+			ServiceId:   "urn:upnp-org:serviceId:RenderingControl",
+			EventSubURL: "_urn-schemas-upnp-org-service-RenderingControl_event",
+            ControlURL: "_urn-schemas-upnp-org-service-RenderingControl_control",
+		},
+        SCPD: QPlayRenderingControlDesc,
+	},
 }
 
-// The control URL for every service is the same. We're able to infer the desired service from the request headers.
 func init() {
-	for _, s := range services {
-		s.ControlURL = serviceControlURL
-	}
 }
 
+// this is used to report what device types we support via SSDP
 func devices() []string {
 	return []string{
-		"urn:schemas-upnp-org:device:MediaServer:1",
+		"urn:schemas-upnp-org:device:MediaRenderer:1", //QPlay specifies we must be a MediaRenderer
+        "urn:schemas-upnp-org:device:MediaServer:1", // VLC won't find us unless we are a MediaServer
 	}
 }
 
@@ -166,7 +188,7 @@ func (me *Server) doSSDP() {
 func (me *Server) ssdpInterface(if_ net.Interface) {
 	s := ssdp.Server{
 		Interface: if_,
-		Devices:   devices(),
+		Devices:   devices(), //Device is a mediaServer..
 		Services:  serviceTypes(),
 		Location: func(ip net.IP) string {
 			return me.location(ip)
@@ -228,6 +250,7 @@ type Server struct {
 	ssdpStopped    chan struct{}
 	// The service SOAP handler keyed by service URN.
 	services   map[string]UPnPService
+
 	LogHeaders bool
 	// Disable transcoding, and the resource elements implied in the CDS.
 	NoTranscode bool
@@ -486,6 +509,7 @@ func (me *mitmRespWriter) CloseNotify() <-chan bool {
 
 // Set the SCPD serve paths.
 func init() {
+    // do I really want this in the serviceID?
 	for _, s := range services {
 		p := path.Join("/scpd", s.ServiceId)
 		s.SCPDURL = p
@@ -515,6 +539,9 @@ func marshalSOAPResponse(sa upnp.SoapAction, args map[string]string) []byte {
 	}
 	return []byte(fmt.Sprintf(`<u:%[1]sResponse xmlns:u="%[2]s">%[3]s</u:%[1]sResponse>`, sa.Action, sa.ServiceURN.String(), xmlMarshalOrPanic(soapArgs)))
 }
+
+// TODO: Can we process endpoint requests for the QPlay interface through the service.Handle() function by just
+// adding text to the matcher in there?
 
 // Handle a SOAP request and return the response arguments or UPnP error.
 func (me *Server) soapActionResponse(sa upnp.SoapAction, actionRequestXML []byte, r *http.Request) (map[string]string, error) {
@@ -596,6 +623,8 @@ func (me *Server) serveIcon(w http.ResponseWriter, r *http.Request) {
 }
 
 func (server *Server) contentDirectoryInitialEvent(urls []*url.URL, sid string) {
+    fmt.Println("CD initial event\n")
+
 	body := xmlMarshalOrPanic(upnp.PropertySet{
 		Properties: []upnp.Property{
 			upnp.Property{
@@ -657,6 +686,7 @@ func (server *Server) contentDirectoryInitialEvent(urls []*url.URL, sid string) 
 var eventingLogger = log.New(ioutil.Discard, "", 0)
 
 func (server *Server) contentDirectoryEventSubHandler(w http.ResponseWriter, r *http.Request) {
+    fmt.Println("CD Event Subhandler, ContentDirectory Specific!\n")
 	if server.StallEventSubscribe {
 		// I have an LG TV that doesn't like my eventing implementation.
 		// Returning unimplemented (501?) errors, results in repeat subscribe
@@ -719,6 +749,8 @@ func (server *Server) initMux(mux *http.ServeMux) {
 			log.Println(err)
 		}
 	})
+
+    // do we want to replace this endpoint with something else to handle it?
 	mux.HandleFunc(contentDirectoryEventSubURL, server.contentDirectoryEventSubHandler)
 	mux.HandleFunc(iconPath, server.serveIcon)
 	mux.HandleFunc(resPath, func(w http.ResponseWriter, r *http.Request) {
@@ -758,9 +790,11 @@ func (server *Server) initMux(mux *http.ServeMux) {
 		server.serveDLNATranscode(w, r, filePath, spec, k)
 	})
 	mux.HandleFunc(rootDescPath, func(w http.ResponseWriter, r *http.Request) {
+        fmt.Println("Root Desc Path handler fired!\n")
 		w.Header().Set("content-type", `text/xml; charset="utf-8"`)
 		w.Header().Set("content-length", fmt.Sprint(len(server.rootDescXML)))
 		w.Header().Set("server", serverField)
+        //fmt.Println("XML served -> ", server.rootDescXML)
 		w.Write(server.rootDescXML)
 	})
 	handleSCPDs(mux)
@@ -775,15 +809,36 @@ func (server *Server) initMux(mux *http.ServeMux) {
 }
 
 func (s *Server) initServices() (err error) {
-	urn, err := upnp.ParseServiceType(services[0].ServiceType)
-	if err != nil {
-		return
-	}
-	s.services = map[string]UPnPService{
-		urn.Type: &contentDirectoryService{
-			Server: s,
-		},
-	}
+
+    s.services = map[string]UPnPService{}
+
+    for _, service := range services {
+        urn, err := upnp.ParseServiceType(service.ServiceType)
+
+        if err != nil {
+            fmt.Println("Failed to parse service type!")
+            break
+	    }
+
+        if (urn.Type == "ContentDirectory") {  //This can go away eventually, we only need to support QPlay..
+            s.services[urn.Type] = &contentDirectoryService {
+                Server: s,
+            }
+        } else if (urn.Type == "AVTransport") {
+             s.services[urn.Type] = &QPlayAVTransportService {
+                Server: s,
+            }
+        } else if (urn.Type == "ConnectionManager") {
+             s.services[urn.Type] = &QPlayConnectionManagerService {
+                Server: s,
+            }
+        } else if (urn.Type == "RenderingControl") {
+             s.services[urn.Type] = &QPlayRenderingControlService {
+                Server: s,
+            }
+        }
+    }
+
 	return
 }
 
@@ -820,15 +875,22 @@ func (srv *Server) Init() (err error) {
 	}
 	srv.httpServeMux = http.NewServeMux()
 	srv.rootDeviceUUID = makeDeviceUuid(srv.FriendlyName)
+    // This is the root device description and its returned when an 'HTTP GET /rootDesc.xml' is hit on the server
 	srv.rootDescXML, err = xml.MarshalIndent(
+
+        // This is the device description and has been updated to support the Tencent QPlay names as given here:
+        // http://open.y.qq.com/QPlayClassic/index.html#2%20Device%20description
 		upnp.DeviceDesc{
 			SpecVersion: upnp.SpecVersion{Major: 1, Minor: 0},
 			Device: upnp.Device{
 				DeviceType:   rootDeviceType,
 				FriendlyName: srv.FriendlyName,
-				Manufacturer: "Matt Joiner <anacrolix@gmail.com>",
+				Manufacturer: "ABC123<contact@bowerswilkins.com>",
 				ModelName:    rootDeviceModelName,
 				UDN:          srv.rootDeviceUUID,
+                QPlayTag:     "QPlay:2", //specific to QPlay service, see link above for required XML tag.
+
+                // this is where we append service listings from the Tencent XML.
 				ServiceList: func() (ss []upnp.Service) {
 					for _, s := range services {
 						ss = append(ss, s.Service)
@@ -902,7 +964,7 @@ func (me *Server) location(ip net.IP) string {
 			IP:   ip,
 			Port: me.httpPort(),
 		}).String(),
-		Path: rootDescPath,
+		Path: rootDescPath, //this tells of the root path and is used in SSDP broadcasts.
 	}
 	return url.String()
 }

@@ -32,6 +32,7 @@ func ParseServiceType(s string) (ret ServiceURN, err error) {
 	}
 	ret.Type = matches[1]
 	ret.Version, err = strconv.ParseUint(matches[2], 0, 0)
+    fmt.Println("ParseServiceType -> ", ret.Type, ret.Version)
 	return
 }
 
@@ -82,6 +83,8 @@ type Device struct {
 	Manufacturer string `xml:"manufacturer"`
 	ModelName    string `xml:"modelName"`
 	UDN          string
+    //NOTE: This QPlayTag was added to device to see if we can support the string QPlay says it needs
+    QPlayTag     string `xml:"qq:X_QPlay_SoftwareCapability"`
 	IconList     []Icon    `xml:"iconList>icon"`
 	ServiceList  []Service `xml:"serviceList>service"`
 }
